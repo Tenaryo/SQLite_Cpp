@@ -1,0 +1,40 @@
+# Build
+build*/
+compile_commands.json
+
+.clangd/
+.cache/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+CTestTestfile.cmake
+_deps
+
+# vcpkg
+vcpkg_installed/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled
+*.o
+*.a
+*.so
+*.d
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+*.log
+*.db
+docs/
