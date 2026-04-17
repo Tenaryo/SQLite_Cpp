@@ -1,6 +1,5 @@
-#include <cstring>
+#include "database.hpp"
 #include <iostream>
-#include <fstream>
 
 int main(int argc, char* argv[]) {
     std::cout << std::unitbuf;
@@ -11,24 +10,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string database_file_path = argv[1];
-    std::string command = argv[2];
+    std::string_view database_file_path = argv[1];
+    std::string_view command = argv[2];
 
     if (command == ".dbinfo") {
-        std::ifstream database_file(database_file_path, std::ios::binary);
-        if (!database_file) {
-            std::cerr << "Failed to open the database file" << std::endl;
+        auto db = Database::open(database_file_path);
+        if (!db) {
+            std::cerr << db.error() << std::endl;
             return 1;
         }
-
-        database_file.seekg(16);
-
-        char buffer[2];
-        database_file.read(buffer, 2);
-
-        unsigned short page_size = (static_cast<unsigned char>(buffer[1]) | (static_cast<unsigned char>(buffer[0]) << 8));
-
-        std::cout << "database page size: " << page_size << std::endl;
+        std::cout << "database page size: " << db->page_size() << '\n'
+                  << "number of tables: " << db->num_tables() << '\n';
     }
 
     return 0;
