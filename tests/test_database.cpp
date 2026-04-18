@@ -51,7 +51,8 @@ auto main() -> int {
     {
         auto sel = parse_select("SELECT name FROM apples");
         assert(sel.has_value());
-        assert(sel->column == "name");
+        assert(sel->columns.size() == 1);
+        assert(sel->columns[0] == "name");
         assert(sel->table == "apples");
         assert(!sel->is_count);
     }
@@ -59,8 +60,19 @@ auto main() -> int {
     {
         auto sel = parse_select("SELECT color FROM oranges");
         assert(sel.has_value());
-        assert(sel->column == "color");
+        assert(sel->columns.size() == 1);
+        assert(sel->columns[0] == "color");
         assert(sel->table == "oranges");
+        assert(!sel->is_count);
+    }
+
+    {
+        auto sel = parse_select("SELECT name, color FROM apples");
+        assert(sel.has_value());
+        assert(sel->columns.size() == 2);
+        assert(sel->columns[0] == "name");
+        assert(sel->columns[1] == "color");
+        assert(sel->table == "apples");
         assert(!sel->is_count);
     }
 
@@ -125,6 +137,18 @@ auto main() -> int {
         assert(output.find("Fuji") != std::string::npos);
         assert(output.find("Honeycrisp") != std::string::npos);
         assert(output.find("Golden Delicious") != std::string::npos);
+    }
+
+    {
+        auto db = Database::open("sample.db");
+        assert(db.has_value());
+        std::ostringstream out;
+        handle_command(*db, "SELECT name, color FROM apples", out);
+        auto output = out.str();
+        assert(output.find("Granny Smith|Light Green") != std::string::npos);
+        assert(output.find("Fuji|Red") != std::string::npos);
+        assert(output.find("Honeycrisp|Blush Red") != std::string::npos);
+        assert(output.find("Golden Delicious|Yellow") != std::string::npos);
     }
 
     return EXIT_SUCCESS;
