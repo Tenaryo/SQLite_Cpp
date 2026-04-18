@@ -8,15 +8,27 @@
 #include <expected>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+struct WhereClause {
+    std::string_view column;
+    std::string_view value;
+};
+
+struct ColumnFilter {
+    size_t column_index;
+    std::string_view value;
+};
+
 struct SelectStatement {
     std::vector<std::string_view> columns;
     std::string_view table;
     bool is_count = false;
+    std::optional<WhereClause> where;
 };
 
 auto parse_select(std::string_view sql) -> std::expected<SelectStatement, std::string> {
@@ -70,10 +82,44 @@ auto parse_select(std::string_view sql) -> std::expected<SelectStatement, std::s
 
     auto tbl_start = sql.find_first_not_of(' ', from_pos + 4);
 
+    auto remaining = sql.substr(tbl_start);
+
+    std::optional<WhereClause> where;
+    auto where_pos = find_ci(remaining, "WHERE");
+    std::string_view table_name;
+    if (where_pos != std::string_view::npos) {
+        table_name = remaining.substr(0, where_pos);
+        while (!table_name.empty() && table_name.back() == ' ')
+            table_name.remove_suffix(1);
+
+        auto after_where = remaining.find_first_not_of(' ', where_pos + 5);
+        auto condition = remaining.substr(after_where);
+
+        auto eq_pos = condition.find('=');
+        if (eq_pos != std::string_view::npos) {
+            auto col = condition.substr(0, eq_pos);
+            while (!col.empty() && col.back() == ' ')
+                col.remove_suffix(1);
+
+            auto val = condition.substr(eq_pos + 1);
+            while (!val.empty() && val.front() == ' ')
+                val.remove_prefix(1);
+            while (!val.empty() && val.back() == ' ')
+                val.remove_suffix(1);
+            if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'')
+                val = val.substr(1, val.size() - 2);
+
+            where = WhereClause{.column = col, .value = val};
+        }
+    } else {
+        table_name = remaining;
+    }
+
     return SelectStatement{
         .columns = std::move(columns),
-        .table = sql.substr(tbl_start),
+        .table = table_name,
         .is_count = is_count,
+        .where = std::move(where),
     };
 }
 
@@ -274,10 +320,22 @@ class Database {
         return columns;
     }
 
-    auto read_columns_values(uint32_t page_number, std::span<const size_t> column_indices) const
+    auto read_columns_values(uint32_t page_number,
+                             std::span<const size_t> column_indices,
+                             const ColumnFilter* filter = nullptr) const
         -> std::vector<std::vector<std::string_view>> {
         auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
         auto num_cells = read_u16_be(page_offset + 3);
+
+        size_t max_col = column_indices.empty() ? 0 : *std::ranges::max_element(column_indices);
+        if (filter)
+            max_col = std::max(max_col, filter->column_index);
+
+        std::vector<size_t> all_indices(column_indices.begin(), column_indices.end());
+        if (filter) {
+            if (std::ranges::find(all_indices, filter->column_index) == all_indices.end())
+                all_indices.push_back(filter->column_index);
+        }
 
         std::vector<std::vector<std::string_view>> rows;
         rows.reserve(num_cells);
@@ -298,8 +356,7 @@ class Database {
             size_t body_offset = 0;
 
             std::vector<std::string_view> row(column_indices.size());
-
-            size_t max_col = *std::ranges::max_element(column_indices);
+            std::string_view filter_val;
 
             for (size_t col = 0; pos < header_end && col <= max_col; ++col) {
                 auto vr = read_varint(pos);
@@ -315,8 +372,18 @@ class Database {
                             sz};
                     }
                 }
+                if (filter && col == filter->column_index) {
+                    if (vr.value >= 13 && vr.value % 2 == 1) {
+                        filter_val = std::string_view{
+                            reinterpret_cast<const char*>(data_.data() + body_base + body_offset),
+                            sz};
+                    }
+                }
                 body_offset += sz;
             }
+
+            if (filter && filter_val != filter->value)
+                continue;
             rows.push_back(std::move(row));
         }
         return rows;
@@ -363,7 +430,22 @@ auto handle_command(const Database& db, std::string_view command, std::ostream& 
                 }
             }
 
-            auto rows = db.read_columns_values(*rp, col_indices);
+            ColumnFilter filter_storage{0, {}};
+            const ColumnFilter* filter = nullptr;
+            if (sel->where) {
+                for (size_t i = 0; i < table_cols.size(); ++i) {
+                    if (std::ranges::equal(table_cols[i], sel->where->column, [](char a, char b) {
+                            return std::tolower(a) == std::tolower(b);
+                        })) {
+                        filter_storage.column_index = i;
+                        filter_storage.value = sel->where->value;
+                        filter = &filter_storage;
+                        break;
+                    }
+                }
+            }
+
+            auto rows = db.read_columns_values(*rp, col_indices, filter);
             for (const auto& row : rows) {
                 for (size_t i = 0; i < row.size(); ++i) {
                     if (i > 0)
