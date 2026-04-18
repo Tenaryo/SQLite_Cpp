@@ -14,9 +14,6 @@ cmake_install.cmake
 CTestTestfile.cmake
 _deps
 
-# vcpkg
-vcpkg_installed/
-
 # IDE
 .idea/
 .vscode/
@@ -38,3 +35,4 @@ Thumbs.db
 *.log
 *.db
 docs/
+.worktree/

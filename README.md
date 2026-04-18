@@ -1,76 +1,88 @@
-[![progress-banner](https://backend.codecrafters.io/progress/sqlite/9a3673e6-55cb-43b2-be2e-8c056ff100d7)](https://app.codecrafters.io/users/Tenaryo?r=2qF)
+# SQLite_Cpp
 
-This is a starting point for C++ solutions to the
-["Build Your Own SQLite" Challenge](https://codecrafters.io/challenges/sqlite).
+A minimal SQLite database file parser written in modern C++23. Reads `.db` files directly, traverses B-tree pages, and executes basic SQL queries — no SQLite library dependency.
 
-In this challenge, you'll build a barebones SQLite implementation that supports
-basic SQL queries like `SELECT`. Along the way we'll learn about
-[SQLite's file format](https://www.sqlite.org/fileformat.html), how indexed data
-is
-[stored in B-trees](https://jvns.ca/blog/2014/10/02/how-does-sqlite-work-part-2-btrees/)
-and more.
+## Features
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+- **SQLite binary format parsing** — reads page headers, cell pointers, varints, and serial types directly from the raw file format
+- **B-tree traversal** — supports both interior and leaf pages for table and index B-trees
+- **SQL query execution**
+  - `SELECT col1, col2 FROM table`
+  - `SELECT COUNT(*) FROM table`
+  - `WHERE column = 'value'` filtering (full table scan and index scan)
+- **Index scan optimization** — uses B-tree index search instead of full table scan when an index is available
+- **Modern C++23** — `std::expected`, `std::ranges`, `std::unreachable()`, `constexpr`, designated initializers, structured bindings
+- **Modular architecture** — separated into `util`, `sql_parser`, `database`, and `command` modules
 
-# Passing the first stage
+## Requirements
 
-The entry point for your SQLite implementation is in `src/main.cpp`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+- C++23 compiler (GCC 13+ / Clang 17+)
+- CMake 3.21+
+- Ninja (recommended)
 
-```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
-```
-
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `cmake` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.cpp`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
-
-# Sample Databases
-
-To make it easy to test queries locally, we've added a sample database in the
-root of this repository: `sample.db`.
-
-This contains two tables: `apples` & `oranges`. You can use this to test your
-implementation for the first 6 stages.
-
-You can explore this database by running queries against it like this:
+## Build
 
 ```sh
-$ sqlite3 sample.db "select id, name from apples"
-1|Granny Smith
-2|Fuji
-3|Honeycrisp
-4|Golden Delicious
+./build.sh            # Debug build (default)
+./build.sh Release    # Release build
 ```
 
-There are two other databases that you can use:
+Or manually:
 
-1. `superheroes.db`:
-   - This is a small version of the test database used in the table-scan stage.
-   - It contains one table: `superheroes`.
-   - It is ~1MB in size.
-1. `companies.db`:
-   - This is a small version of the test database used in the index-scan stage.
-   - It contains one table: `companies`, and one index: `idx_companies_country`
-   - It is ~7MB in size.
+```sh
+cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j$(nproc)
+```
 
-These aren't included in the repository because they're large in size. You can
-download them by running this script:
+### Sanitizers
+
+Enable Address Sanitizer and Undefined Behavior Sanitizer:
+
+```sh
+cmake -B build -S . -G Ninja -DENABLE_SANITIZERS=ON
+cmake --build build -j$(nproc)
+```
+
+## Test
+
+```sh
+./run_tests.sh
+```
+
+Sample databases are needed for testing. Download them:
 
 ```sh
 ./download_sample_databases.sh
 ```
 
-If the script doesn't work for some reason, you can download the databases
-directly from
-[codecrafters-io/sample-sqlite-databases](https://github.com/codecrafters-io/sample-sqlite-databases).
+## Usage
+
+```sh
+./build/sqlite <database.db> "<command>"
+
+# Meta commands
+./build/sqlite sample.db ".dbinfo"
+./build/sqlite sample.db ".tables"
+
+# SQL queries
+./build/sqlite sample.db "SELECT COUNT(*) FROM apples"
+./build/sqlite sample.db "SELECT name, color FROM apples"
+./build/sqlite sample.db "SELECT name FROM apples WHERE color = 'Yellow'"
+```
+
+## Project Structure
+
+```
+src/
+  util.hpp          # Shared utilities (case-insensitive comparison, trim)
+  sql_parser.hpp    # SQL SELECT statement parser
+  database.hpp      # Core Database class (binary parsing, B-tree traversal)
+  command.hpp       # Query execution and command dispatch
+  main.cpp          # CLI entry point
+tests/
+  test_database.cpp # Test suite
+```
+
+## License
+
+See [LICENSE](LICENSE).
