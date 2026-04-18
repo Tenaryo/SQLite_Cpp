@@ -147,6 +147,16 @@ class Database {
         return static_cast<uint16_t>(data_[offset]) << 8 | static_cast<uint16_t>(data_[offset + 1]);
     }
 
+    auto read_u32_be(size_t offset) const noexcept -> uint32_t {
+        return static_cast<uint32_t>(data_[offset]) << 24 |
+               static_cast<uint32_t>(data_[offset + 1]) << 16 |
+               static_cast<uint32_t>(data_[offset + 2]) << 8 |
+               static_cast<uint32_t>(data_[offset + 3]);
+    }
+
+    static constexpr uint8_t kTableInterior = 0x05;
+    static constexpr uint8_t kTableLeaf = 0x0D;
+
     struct VarintResult {
         uint64_t value;
         size_t consumed;
@@ -276,7 +286,20 @@ class Database {
 
     auto count_rows(uint32_t page_number) const -> uint32_t {
         auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
-        return read_u16_be(page_offset + 3);
+        auto type = static_cast<uint8_t>(data_[page_offset]);
+
+        if (type == kTableLeaf)
+            return read_u16_be(page_offset + 3);
+
+        auto num_cells = read_u16_be(page_offset + 3);
+        auto right_child = read_u32_be(page_offset + 8);
+        uint32_t total = count_rows(right_child);
+        for (uint32_t i = 0; i < num_cells; ++i) {
+            auto cell_ptr = page_offset + read_u16_be(page_offset + 12 + i * 2);
+            auto child = read_u32_be(cell_ptr);
+            total += count_rows(child);
+        }
+        return total;
     }
 
     auto table_sql(std::string_view table_name) const -> std::string_view {
@@ -323,21 +346,35 @@ class Database {
     auto read_columns_values(uint32_t page_number,
                              std::span<const size_t> column_indices,
                              const ColumnFilter* filter = nullptr) const
-        -> std::vector<std::vector<std::string_view>> {
+        -> std::vector<std::vector<std::string>> {
         auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
+        auto type = static_cast<uint8_t>(data_[page_offset]);
+
+        if (type == kTableInterior) {
+            auto num_cells = read_u16_be(page_offset + 3);
+            auto right_child = read_u32_be(page_offset + 8);
+
+            std::vector<std::vector<std::string>> rows;
+            for (uint32_t i = 0; i < num_cells; ++i) {
+                auto cell_ptr = page_offset + read_u16_be(page_offset + 12 + i * 2);
+                auto child = read_u32_be(cell_ptr);
+                auto child_rows = read_columns_values(child, column_indices, filter);
+                for (auto& r : child_rows)
+                    rows.push_back(std::move(r));
+            }
+            auto right_rows = read_columns_values(right_child, column_indices, filter);
+            for (auto& r : right_rows)
+                rows.push_back(std::move(r));
+            return rows;
+        }
+
         auto num_cells = read_u16_be(page_offset + 3);
 
         size_t max_col = column_indices.empty() ? 0 : *std::ranges::max_element(column_indices);
         if (filter)
             max_col = std::max(max_col, filter->column_index);
 
-        std::vector<size_t> all_indices(column_indices.begin(), column_indices.end());
-        if (filter) {
-            if (std::ranges::find(all_indices, filter->column_index) == all_indices.end())
-                all_indices.push_back(filter->column_index);
-        }
-
-        std::vector<std::vector<std::string_view>> rows;
+        std::vector<std::vector<std::string>> rows;
         rows.reserve(num_cells);
 
         for (uint32_t i = 0; i < num_cells; ++i) {
@@ -345,7 +382,8 @@ class Database {
 
             auto pos = cell_ptr;
             pos += read_varint(pos).consumed;
-            pos += read_varint(pos).consumed;
+            auto rowid_vr = read_varint(pos);
+            pos += rowid_vr.consumed;
 
             auto header_start = pos;
             auto header_size_vr = read_varint(pos);
@@ -355,30 +393,48 @@ class Database {
             auto body_base = header_start + header_size_vr.value;
             size_t body_offset = 0;
 
-            std::vector<std::string_view> row(column_indices.size());
-            std::string_view filter_val;
+            std::vector<std::string> row(column_indices.size());
+            std::string filter_val;
 
             for (size_t col = 0; pos < header_end && col <= max_col; ++col) {
                 auto vr = read_varint(pos);
                 pos += vr.consumed;
                 auto sz = serial_type_size(vr.value);
 
+                auto resolve = [&]() -> std::string {
+                    if (vr.value == 0)
+                        return std::to_string(rowid_vr.value);
+                    if (vr.value == 8)
+                        return "0";
+                    if (vr.value == 9)
+                        return "1";
+                    if (vr.value >= 1 && vr.value <= 6) {
+                        uint64_t ival = 0;
+                        for (size_t j = 0; j < sz; ++j)
+                            ival = (ival << 8) |
+                                   static_cast<uint8_t>(data_[body_base + body_offset + j]);
+                        return std::to_string(ival);
+                    }
+                    if (vr.value >= 13 && vr.value % 2 == 1) {
+                        return std::string{
+                            reinterpret_cast<const char*>(data_.data() + body_base + body_offset),
+                            sz};
+                    }
+                    return {};
+                };
+
+                auto val = resolve();
+
                 auto it = std::ranges::find(column_indices, col);
                 if (it != column_indices.end()) {
                     auto idx = static_cast<size_t>(it - column_indices.begin());
-                    if (vr.value >= 13 && vr.value % 2 == 1) {
-                        row[idx] = std::string_view{
-                            reinterpret_cast<const char*>(data_.data() + body_base + body_offset),
-                            sz};
-                    }
+                    row[idx] = std::move(val);
+                    if (filter && col == filter->column_index)
+                        filter_val = row[idx];
+                } else if (filter && col == filter->column_index) {
+                    filter_val = std::move(val);
                 }
-                if (filter && col == filter->column_index) {
-                    if (vr.value >= 13 && vr.value % 2 == 1) {
-                        filter_val = std::string_view{
-                            reinterpret_cast<const char*>(data_.data() + body_base + body_offset),
-                            sz};
-                    }
-                }
+
                 body_offset += sz;
             }
 

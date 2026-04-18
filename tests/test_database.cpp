@@ -201,13 +201,12 @@ auto main() -> int {
         assert(db.has_value());
         std::ostringstream out;
         handle_command(*db, "SELECT id, name FROM superheroes WHERE eye_color = 'Pink Eyes'", out);
-        assert(out.str() ==
-               "297|Stealth (New Earth)\n"
-               "790|Tobias Whale (New Earth)\n"
-               "1085|Felicity (New Earth)\n"
-               "2729|Thrust (New Earth)\n"
-               "3289|Angora Lapin (New Earth)\n"
-               "3913|Matris Ater Clementia (New Earth)\n");
+        assert(out.str() == "297|Stealth (New Earth)\n"
+                            "790|Tobias Whale (New Earth)\n"
+                            "1085|Felicity (New Earth)\n"
+                            "2729|Thrust (New Earth)\n"
+                            "3289|Angora Lapin (New Earth)\n"
+                            "3913|Matris Ater Clementia (New Earth)\n");
     }
 
     {
