@@ -10,18 +10,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string_view database_file_path = argv[1];
-    std::string_view command = argv[2];
-
-    if (command == ".dbinfo") {
-        auto db = Database::open(database_file_path);
-        if (!db) {
-            std::cerr << db.error() << std::endl;
-            return 1;
-        }
-        std::cout << "database page size: " << db->page_size() << '\n'
-                  << "number of tables: " << db->num_tables() << '\n';
+    auto db = Database::open(argv[1]);
+    if (!db) {
+        std::cerr << db.error() << std::endl;
+        return 1;
     }
 
-    return 0;
+    handle_command(*db, argv[2], std::cout);
 }
