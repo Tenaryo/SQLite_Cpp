@@ -8,12 +8,13 @@
 #include <expected>
 #include <format>
 #include <fstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 struct SelectStatement {
-    std::string_view column;
+    std::vector<std::string_view> columns;
     std::string_view table;
     bool is_count = false;
 };
@@ -46,16 +47,31 @@ auto parse_select(std::string_view sql) -> std::expected<SelectStatement, std::s
 
     auto after_select = sql.find_first_not_of(' ', 6);
     auto col_region = sql.substr(after_select, from_pos - after_select);
-    auto col_trimmed = col_region;
-    while (!col_trimmed.empty() && col_trimmed.back() == ' ')
-        col_trimmed.remove_suffix(1);
+    while (!col_region.empty() && col_region.back() == ' ')
+        col_region.remove_suffix(1);
 
-    bool is_count = find_ci(col_trimmed, "COUNT(*)") != std::string_view::npos;
+    bool is_count = find_ci(col_region, "COUNT(*)") != std::string_view::npos;
+
+    std::vector<std::string_view> columns;
+    if (!is_count) {
+        size_t pos = 0;
+        while (pos < col_region.size()) {
+            auto comma = col_region.find(',', pos);
+            auto end = comma == std::string_view::npos ? col_region.size() : comma;
+            auto col = col_region.substr(pos, end - pos);
+            while (!col.empty() && col.front() == ' ')
+                col.remove_prefix(1);
+            while (!col.empty() && col.back() == ' ')
+                col.remove_suffix(1);
+            columns.push_back(col);
+            pos = end + 1;
+        }
+    }
 
     auto tbl_start = sql.find_first_not_of(' ', from_pos + 4);
 
     return SelectStatement{
-        .column = col_trimmed,
+        .columns = std::move(columns),
         .table = sql.substr(tbl_start),
         .is_count = is_count,
     };
@@ -258,13 +274,13 @@ class Database {
         return columns;
     }
 
-    auto read_column_values(uint32_t page_number,
-                            size_t column_index) const -> std::vector<std::string_view> {
+    auto read_columns_values(uint32_t page_number, std::span<const size_t> column_indices) const
+        -> std::vector<std::vector<std::string_view>> {
         auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
         auto num_cells = read_u16_be(page_offset + 3);
 
-        std::vector<std::string_view> values;
-        values.reserve(num_cells);
+        std::vector<std::vector<std::string_view>> rows;
+        rows.reserve(num_cells);
 
         for (uint32_t i = 0; i < num_cells; ++i) {
             auto cell_ptr = page_offset + read_u16_be(page_offset + 8 + i * 2);
@@ -278,26 +294,32 @@ class Database {
             pos += header_size_vr.consumed;
             auto header_end = header_start + header_size_vr.value;
 
+            auto body_base = header_start + header_size_vr.value;
             size_t body_offset = 0;
 
-            for (size_t col = 0; pos < header_end; ++col) {
+            std::vector<std::string_view> row(column_indices.size());
+
+            size_t max_col = *std::ranges::max_element(column_indices);
+
+            for (size_t col = 0; pos < header_end && col <= max_col; ++col) {
                 auto vr = read_varint(pos);
                 pos += vr.consumed;
                 auto sz = serial_type_size(vr.value);
 
-                if (col == column_index) {
+                auto it = std::ranges::find(column_indices, col);
+                if (it != column_indices.end()) {
+                    auto idx = static_cast<size_t>(it - column_indices.begin());
                     if (vr.value >= 13 && vr.value % 2 == 1) {
-                        values.push_back(std::string_view{
-                            reinterpret_cast<const char*>(data_.data() + header_start +
-                                                          header_size_vr.value + body_offset),
-                            sz});
+                        row[idx] = std::string_view{
+                            reinterpret_cast<const char*>(data_.data() + body_base + body_offset),
+                            sz};
                     }
-                    break;
                 }
                 body_offset += sz;
             }
+            rows.push_back(std::move(row));
         }
-        return values;
+        return rows;
     }
 };
 
@@ -326,18 +348,30 @@ auto handle_command(const Database& db, std::string_view command, std::ostream& 
             out << db.count_rows(*rp) << '\n';
         } else {
             auto sql = db.table_sql(sel->table);
-            auto columns = db.parse_create_table(sql);
-            size_t col_idx = 0;
-            for (size_t i = 0; i < columns.size(); ++i) {
-                if (std::ranges::equal(columns[i], sel->column, [](char a, char b) {
-                        return std::tolower(a) == std::tolower(b);
-                    })) {
-                    col_idx = i;
-                    break;
+            auto table_cols = db.parse_create_table(sql);
+
+            std::vector<size_t> col_indices;
+            col_indices.reserve(sel->columns.size());
+            for (const auto& col_name : sel->columns) {
+                for (size_t i = 0; i < table_cols.size(); ++i) {
+                    if (std::ranges::equal(table_cols[i], col_name, [](char a, char b) {
+                            return std::tolower(a) == std::tolower(b);
+                        })) {
+                        col_indices.push_back(i);
+                        break;
+                    }
                 }
             }
-            for (const auto& val : db.read_column_values(*rp, col_idx))
-                out << val << '\n';
+
+            auto rows = db.read_columns_values(*rp, col_indices);
+            for (const auto& row : rows) {
+                for (size_t i = 0; i < row.size(); ++i) {
+                    if (i > 0)
+                        out << '|';
+                    out << row[i];
+                }
+                out << '\n';
+            }
         }
     }
 }

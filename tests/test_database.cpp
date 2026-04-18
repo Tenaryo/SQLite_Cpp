@@ -108,23 +108,25 @@ auto main() -> int {
     {
         auto db = Database::open("sample.db");
         assert(db.has_value());
-        auto vals = db->read_column_values(2, 1);
-        assert(vals.size() == 4);
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Granny Smith"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Fuji"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Honeycrisp"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Golden Delicious"; }));
+        const auto idx = std::vector<size_t>{1};
+        auto rows = db->read_columns_values(2, idx);
+        assert(rows.size() == 4);
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Granny Smith"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Fuji"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Honeycrisp"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Golden Delicious"; }));
     }
 
     {
         auto db = Database::open("sample.db");
         assert(db.has_value());
-        auto vals = db->read_column_values(2, 2);
-        assert(vals.size() == 4);
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Light Green"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Red"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Blush Red"; }));
-        assert(std::ranges::any_of(vals, [](auto v) { return v == "Yellow"; }));
+        const auto idx = std::vector<size_t>{2};
+        auto rows = db->read_columns_values(2, idx);
+        assert(rows.size() == 4);
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Light Green"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Red"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Blush Red"; }));
+        assert(std::ranges::any_of(rows, [](auto& r) { return r[0] == "Yellow"; }));
     }
 
     {
