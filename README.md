@@ -1,4 +1,4 @@
-# SQLite_Cpp
+# TinySqlite
 
 A minimal SQLite database file parser written in modern C++23. Reads `.db` files directly, traverses B-tree pages, and executes basic SQL queries — no SQLite library dependency.
 
