@@ -156,6 +156,8 @@ class Database {
 
     static constexpr uint8_t kTableInterior = 0x05;
     static constexpr uint8_t kTableLeaf = 0x0D;
+    static constexpr uint8_t kIndexInterior = 0x02;
+    static constexpr uint8_t kIndexLeaf = 0x0A;
 
     struct VarintResult {
         uint64_t value;
@@ -245,7 +247,177 @@ class Database {
 
         return {.type = type, .name = name, .rootpage = rootpage, .sql = sql};
     }
+
+    auto parse_index_cell(size_t cell_offset) const -> std::pair<std::string_view, uint64_t> {
+        auto pos = cell_offset;
+        pos += read_varint(pos).consumed;
+
+        auto header_start = pos;
+        auto header_size_vr = read_varint(pos);
+        pos += header_size_vr.consumed;
+
+        auto st0 = read_varint(pos);
+        pos += st0.consumed;
+        auto st1 = read_varint(pos);
+        pos += st1.consumed;
+
+        auto body = header_start + header_size_vr.value;
+        auto sz0 = serial_type_size(st0.value);
+        auto col_val = std::string_view{reinterpret_cast<const char*>(data_.data() + body), sz0};
+
+        auto sz1 = serial_type_size(st1.value);
+        uint64_t rowid = 0;
+        for (size_t j = 0; j < sz1; ++j)
+            rowid = (rowid << 8) | static_cast<uint8_t>(data_[body + sz0 + j]);
+
+        return {col_val, rowid};
+    }
+
+    auto parse_row_columns(size_t pos,
+                           std::span<const size_t> column_indices,
+                           uint64_t rowid) const -> std::vector<std::string> {
+        auto header_start = pos;
+        auto header_size_vr = read_varint(pos);
+        pos += header_size_vr.consumed;
+        auto header_end = header_start + header_size_vr.value;
+
+        auto body_base = header_start + header_size_vr.value;
+        size_t body_offset = 0;
+
+        size_t max_col = column_indices.empty() ? 0 : *std::ranges::max_element(column_indices);
+        std::vector<std::string> row(column_indices.size());
+
+        for (size_t col = 0; pos < header_end && col <= max_col; ++col) {
+            auto vr = read_varint(pos);
+            pos += vr.consumed;
+            auto sz = serial_type_size(vr.value);
+
+            auto resolve = [&]() -> std::string {
+                if (vr.value == 0)
+                    return std::to_string(rowid);
+                if (vr.value == 8)
+                    return "0";
+                if (vr.value == 9)
+                    return "1";
+                if (vr.value >= 1 && vr.value <= 6) {
+                    uint64_t ival = 0;
+                    for (size_t j = 0; j < sz; ++j)
+                        ival =
+                            (ival << 8) | static_cast<uint8_t>(data_[body_base + body_offset + j]);
+                    return std::to_string(ival);
+                }
+                if (vr.value >= 13 && vr.value % 2 == 1) {
+                    return std::string{
+                        reinterpret_cast<const char*>(data_.data() + body_base + body_offset), sz};
+                }
+                return {};
+            };
+
+            auto val = resolve();
+            auto it = std::ranges::find(column_indices, col);
+            if (it != column_indices.end()) {
+                auto idx = static_cast<size_t>(it - column_indices.begin());
+                row[idx] = std::move(val);
+            }
+            body_offset += sz;
+        }
+        return row;
+    }
   public:
+    auto index_search(uint32_t page_number,
+                      std::string_view target) const -> std::vector<uint64_t> {
+        auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
+        auto type = static_cast<uint8_t>(data_[page_offset]);
+
+        if (type == kIndexLeaf) {
+            auto num_cells = read_u16_be(page_offset + 3);
+            std::vector<uint64_t> rowids;
+            for (uint32_t i = 0; i < num_cells; ++i) {
+                auto cell_ptr = page_offset + read_u16_be(page_offset + 8 + i * 2);
+                auto [val, rowid] = parse_index_cell(cell_ptr);
+                if (val == target) {
+                    rowids.push_back(rowid);
+                } else if (val > target) {
+                    break;
+                }
+            }
+            return rowids;
+        }
+
+        if (type == kIndexInterior) {
+            auto num_cells = read_u16_be(page_offset + 3);
+            auto right_child = read_u32_be(page_offset + 8);
+            std::vector<uint64_t> rowids;
+
+            for (uint32_t i = 0; i < num_cells; ++i) {
+                auto cell_ptr = page_offset + read_u16_be(page_offset + 12 + i * 2);
+                auto left_child = read_u32_be(cell_ptr);
+                auto [val, rowid] = parse_index_cell(cell_ptr + 4);
+
+                if (val < target) {
+                    continue;
+                } else if (val == target) {
+                    rowids.push_back(rowid);
+                    auto child_rowids = index_search(left_child, target);
+                    for (auto r : child_rowids)
+                        rowids.push_back(r);
+                } else {
+                    auto child_rowids = index_search(left_child, target);
+                    for (auto r : child_rowids)
+                        rowids.push_back(r);
+                    return rowids;
+                }
+            }
+            auto child_rowids = index_search(right_child, target);
+            for (auto r : child_rowids)
+                rowids.push_back(r);
+            return rowids;
+        }
+
+        return {};
+    }
+
+    auto read_row_by_rowid(uint32_t page_number,
+                           uint64_t target_rowid,
+                           std::span<const size_t> column_indices) const
+        -> std::optional<std::vector<std::string>> {
+        auto page_offset = static_cast<size_t>(page_number - 1) * page_size_;
+        auto type = static_cast<uint8_t>(data_[page_offset]);
+
+        if (type == kTableInterior) {
+            auto num_cells = read_u16_be(page_offset + 3);
+            auto right_child = read_u32_be(page_offset + 8);
+
+            for (uint32_t i = 0; i < num_cells; ++i) {
+                auto cell_ptr = page_offset + read_u16_be(page_offset + 12 + i * 2);
+                auto child = read_u32_be(cell_ptr);
+                auto key_vr = read_varint(cell_ptr + 4);
+
+                if (target_rowid <= key_vr.value) {
+                    return read_row_by_rowid(child, target_rowid, column_indices);
+                }
+            }
+            return read_row_by_rowid(right_child, target_rowid, column_indices);
+        }
+
+        auto num_cells = read_u16_be(page_offset + 3);
+        for (uint32_t i = 0; i < num_cells; ++i) {
+            auto cell_ptr = page_offset + read_u16_be(page_offset + 8 + i * 2);
+            auto pos = cell_ptr;
+            pos += read_varint(pos).consumed;
+            auto rowid_vr = read_varint(pos);
+            pos += rowid_vr.consumed;
+
+            if (rowid_vr.value == target_rowid) {
+                return parse_row_columns(pos, column_indices, rowid_vr.value);
+            }
+            if (rowid_vr.value > target_rowid) {
+                break;
+            }
+        }
+        return std::nullopt;
+    }
+
     static auto open(std::string_view path) -> std::expected<Database, std::string> {
         std::ifstream file(std::string(path), std::ios::binary);
         if (!file)
@@ -282,6 +454,37 @@ class Database {
                 }))
                 return entry.rootpage;
         return std::unexpected(std::format("Error: no such table: {}", table_name));
+    }
+
+    auto index_rootpage(std::string_view table_name, std::string_view column_name) const
+        -> std::expected<uint32_t, std::string> {
+        for (const auto& entry : schema_) {
+            if (entry.type != "index")
+                continue;
+            if (entry.sql.find(table_name) == std::string_view::npos)
+                continue;
+            auto to_lower = [](char c) {
+                return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            };
+            bool found = false;
+            auto& sql = entry.sql;
+            for (size_t i = 0; i + column_name.size() <= sql.size(); ++i) {
+                bool match = true;
+                for (size_t j = 0; j < column_name.size(); ++j) {
+                    if (to_lower(sql[i + j]) != to_lower(column_name[j])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                return entry.rootpage;
+        }
+        return std::unexpected(std::format("No index for {}.{}", table_name, column_name));
     }
 
     auto count_rows(uint32_t page_number) const -> uint32_t {
@@ -498,6 +701,26 @@ auto handle_command(const Database& db, std::string_view command, std::ostream& 
                         filter = &filter_storage;
                         break;
                     }
+                }
+            }
+
+            if (sel->where) {
+                auto idx_rp = db.index_rootpage(sel->table, sel->where->column);
+                if (idx_rp) {
+                    auto rowids = db.index_search(*idx_rp, sel->where->value);
+                    std::ranges::sort(rowids);
+                    for (auto rid : rowids) {
+                        auto row = db.read_row_by_rowid(*rp, rid, col_indices);
+                        if (row) {
+                            for (size_t i = 0; i < row->size(); ++i) {
+                                if (i > 0)
+                                    out << '|';
+                                out << (*row)[i];
+                            }
+                            out << '\n';
+                        }
+                    }
+                    return;
                 }
             }
 
